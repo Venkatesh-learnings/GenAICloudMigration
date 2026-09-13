@@ -1,6 +1,6 @@
 # Agentic SDLC Orchestrator — URL Shortener
 
-An interview prototype in two parts:
+The prototype in two parts:
 
 1. **`UrlShortener.*`** — a real URL shortener service (ASP.NET Core + EF Core/SQLite):
    create/redirect/analytics/expire, idempotency, rate limiting.
@@ -12,17 +12,6 @@ An interview prototype in two parts:
    matter across three scenarios: **greenfield**, **brownfield**, and **ambiguous**.
 
 Start here, then go deeper:
-
-| Doc | Covers |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | Components, the orchestration model, control flow, key decisions |
-| [docs/scenarios/greenfield.md](docs/scenarios/greenfield.md) | Building the core APIs from nothing |
-| [docs/scenarios/brownfield.md](docs/scenarios/brownfield.md) | Adding a bulk-expire feature to the existing codebase |
-| [docs/scenarios/ambiguous.md](docs/scenarios/ambiguous.md) | A vague requirement, normalized before it's acted on |
-| [docs/scenarios/security-governance.md](docs/scenarios/security-governance.md) | A fourth scenario that actually trips the guardrails, plus the deny/safe-stop path |
-| [docs/setup.md](docs/setup.md) | Build, test, run the API, run the orchestrator, run in Docker |
-| [docs/testing-and-limitations.md](docs/testing-and-limitations.md) | Testing approach, known limitations, trade-offs |
-| [docs/engineering-summary.md](docs/engineering-summary.md) | Plan, rationale, risks, assumptions — the final summary |
 
 ## 60-second quick start
 
