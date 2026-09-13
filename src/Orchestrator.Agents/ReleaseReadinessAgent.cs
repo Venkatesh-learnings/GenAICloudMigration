@@ -31,6 +31,16 @@ public class ReleaseReadinessAgent : IStageAgent
             blockers.Add("Documentation stage did not succeed.");
         }
 
+        // A skipped security review is fine (it wasn't applicable); one that ran and asked
+        // for changes is a hard blocker.
+        var securityResult = context.GetResult("SecurityReview");
+        if (securityResult is not null &&
+            securityResult.Outputs.GetValueOrDefault("verdict", "").ToString() is { } verdict &&
+            !verdict.Equals("pass", StringComparison.OrdinalIgnoreCase))
+        {
+            blockers.Add($"Security review verdict is '{verdict}' rather than 'pass'.");
+        }
+
         var deniedApprovals = context.AuditLog.Count(a => a.EventType == AuditEventType.ApprovalDenied);
         if (deniedApprovals > 0)
         {

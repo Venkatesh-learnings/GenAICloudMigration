@@ -22,46 +22,70 @@ This time `RequirementAnalysis` and `Design` also receive real **codebase contex
 > IShortUrlRepository rather than bypass it, and must not lock the ShortUrls table for
 > an unbounded scan on a large dataset.
 
-## Codebase reasoning
+## Codebase reasoning — reading the repo, not a description of it
 
-This is the scenario that exercises **Core Requirement #3 (Codebase Reasoning)**: the
-`Design` stage has to propose a change that (a) reuses the existing repository
-abstraction instead of reaching around it with raw SQL, (b) doesn't regress the
-single-expire endpoint's idempotency, and (c) accounts for a real operational concern
-(an unbounded table scan) that only exists because a real table with a real growth
-pattern already exists — none of which a greenfield design would need to consider.
+This is the scenario that exercises **Core Requirement #3 (Codebase Reasoning)**. The
+`CodebaseAnalysis` stage runs `CodebaseScanner` over the actual repository before
+anything reasons about impact: it enumerates projects and their references, the HTTP
+routes each exposes, the EF entity sets behind them, and ranks files by how many of the
+requirement's distinctive terms they contain. On the run below it reported:
+
+```
+CodebaseAnalysis: Codebase analyzed: 9 project(s), 12 file(s) related to this requirement.
+   rationale: Scanned 9 project(s) off disk; LLM unavailable, so impact was derived
+   directly from the scan (keyword-relevant files and the projects owning them).
+```
+
+Those numbers come from disk, so they change when the code changes — which is the point.
+The full inventory is written to `artifacts/runs/<runId>/CodebaseAnalysis/codebase-inventory.md`,
+and with an API key set the model reasons over that inventory to name impacted modules,
+APIs, data flows and regression risks, grounded in facts it was given rather than
+invented file names.
+
+## Decomposition
+
+`TaskDecomposition` turns the requirement into a validated task DAG and then *becomes*
+the graph — here it derived four tasks across three waves (the real `task-plan.md`
+artifact from the run):
+
+| Task | Title | Depends on |
+|---|---|---|
+| T1 | Add a bulk-expire operation to the existing URL shortener: given a cutoff date | — |
+| T2 | Deactivate every short URL created before that date in one call | T1 |
+| T3 | Without breaking the existing single-URL expire endpoint or its idempotency guarantees | T1 |
+| T4 | Integrate and validate the delivered pieces end to end | T2, T3 |
+
+Sequencing: `T1` → `T2 ∥ T3` → `T4`. The engine then runs `Implementation:T2` and
+`Implementation:T3` concurrently, because the decomposition said they're independent —
+the parallelism is derived from the requirement, not hardcoded in the pipeline.
 
 ## Orchestration trace (actual run, offline fallback mode)
 
 ```
 -- Stage statuses --
   RequirementAnalysis  Succeeded
-  Documentation        Succeeded
-  ReleaseReadiness     Succeeded
-  Testing              Succeeded
-  Implementation       Succeeded
+  CodebaseAnalysis     Succeeded
+  TaskDecomposition    Succeeded
   Design               Succeeded
-
--- Decision lineage --
-  [08:37:xx] RequirementAnalysis: Requirement normalized. 0 ambiguity(ies) identified.
-  [08:37:xx] Design: Design complete: Design for: Add a bulk-expire operation to the
-             existing URL shortener: given a cutoff date, deactivate every short URL
-             created before that date in one call, without breaking the existing
-             single-URL expire endpoint or its idempotency guarantees.
-  [08:37:xx] Implementation: Implementation artifact generated at .../Implementation/implementation.md
-  [08:37:xx] Testing: Test plan generated (real test execution skipped by configuration).
-  [08:37:xx] Documentation: Documentation written to .../Documentation/CHANGE.md
-  [08:37:xx] ReleaseReadiness: Release readiness decision: GO.
-
--- Reliability metrics --
-  Success rate:     100 % (6/6 stages)
+  Implementation:T1    Succeeded
+  Implementation:T2    Succeeded
+  Implementation:T3    Succeeded
+  Implementation:T4    Succeeded
+  Implementation       Succeeded
+  Testing              Succeeded
+  Documentation        Succeeded
+  SecurityReview       Skipped
+  ReleaseReadiness     Succeeded
 ```
 
-Same graph, same engine, same governance mechanisms as the greenfield run — nothing
-about the orchestrator changes between scenarios. Only the input (`requirement` +
-`codebaseContext`) and, in a real LLM run, the resulting Design/Implementation content
-differ. That's intentional: the orchestration layer is generic over the kind of SDLC
-work it's coordinating.
+`SecurityReview` is `Skipped` because its entry gate found nothing security-sensitive in
+this change — and `ReleaseReadiness` still ran anyway, because it declares
+`DependencyRule.AllSettled`. A skipped-because-inapplicable review must not block a
+release; a *failed* one still would.
+
+Same engine and same governance mechanisms as the greenfield run — but not the same
+executed graph, because the decomposition and the entry gates responded to this
+requirement.
 
 ## Validation
 

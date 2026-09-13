@@ -14,7 +14,9 @@ public static class StageBuilder
         int maxRetries = 1,
         TimeSpan? retryBaseDelay = null,
         Func<WorkflowContext, bool>? entryGate = null,
-        Func<WorkflowContext, StageResult, bool>? exitGate = null) =>
+        Func<WorkflowContext, StageResult, bool>? exitGate = null,
+        DependencyRule dependencyRule = DependencyRule.AllSucceeded,
+        bool highImpact = false) =>
         new StageDefinition
         {
             Id = id,
@@ -24,7 +26,9 @@ public static class StageBuilder
             MaxRetries = maxRetries,
             RetryBaseDelay = retryBaseDelay ?? TimeSpan.FromMilliseconds(2),
             EntryGate = entryGate ?? (_ => true),
-            ExitGate = exitGate ?? ((_, r) => r.Success)
+            ExitGate = exitGate ?? ((_, r) => r.Success),
+            DependencyRule = dependencyRule,
+            HighImpact = highImpact
         };
 }
 
@@ -64,6 +68,42 @@ public class OrderTrackingAgent(string id, List<string> order) : IStageAgent
         }
         return Task.FromResult(StageResult.Ok($"{id} done"));
     }
+}
+
+/// <summary>
+/// Runs an arbitrary callback against the run context before succeeding — used to drive
+/// runtime graph expansion (<see cref="WorkflowContext.RequestStages"/>) from inside a stage.
+/// Also records its own execution order so a barrier can be proven to run afterwards.
+/// </summary>
+public class CallbackAgent(string id, Action<WorkflowContext> onExecute, List<string>? order = null) : IStageAgent
+{
+    public int CallCount;
+
+    public Task<StageResult> ExecuteAsync(WorkflowContext context, StageDefinition stage, CancellationToken ct)
+    {
+        Interlocked.Increment(ref CallCount);
+        onExecute(context);
+
+        if (order is not null)
+        {
+            lock (order)
+            {
+                order.Add(id);
+            }
+        }
+
+        return Task.FromResult(StageResult.Ok($"{id} done"));
+    }
+}
+
+/// <summary>Succeeds with a fixed output payload, so policy rules that scan produced work have something to find.</summary>
+public class ProducingAgent(string id, string outputKey, string outputValue) : IStageAgent
+{
+    public Task<StageResult> ExecuteAsync(WorkflowContext context, StageDefinition stage, CancellationToken ct) =>
+        Task.FromResult(StageResult.Ok(
+            $"{id} done",
+            "produced work for downstream stages",
+            new Dictionary<string, object> { [outputKey] = outputValue }));
 }
 
 /// <summary>Returns a scripted sequence of results, one per call; repeats the last result once exhausted.</summary>

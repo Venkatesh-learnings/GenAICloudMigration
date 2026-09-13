@@ -19,6 +19,7 @@ Start here, then go deeper:
 | [docs/scenarios/greenfield.md](docs/scenarios/greenfield.md) | Building the core APIs from nothing |
 | [docs/scenarios/brownfield.md](docs/scenarios/brownfield.md) | Adding a bulk-expire feature to the existing codebase |
 | [docs/scenarios/ambiguous.md](docs/scenarios/ambiguous.md) | A vague requirement, normalized before it's acted on |
+| [docs/scenarios/security-governance.md](docs/scenarios/security-governance.md) | A fourth scenario that actually trips the guardrails, plus the deny/safe-stop path |
 | [docs/setup.md](docs/setup.md) | Build, test, run the API, run the orchestrator, run in Docker |
 | [docs/testing-and-limitations.md](docs/testing-and-limitations.md) | Testing approach, known limitations, trade-offs |
 | [docs/engineering-summary.md](docs/engineering-summary.md) | Plan, rationale, risks, assumptions — the final summary |
@@ -50,9 +51,11 @@ src/
   UrlShortener.Infrastructure/  EF Core + SQLite persistence
   UrlShortener.Api/             ASP.NET Core Web API, rate limiting, Swagger
   Orchestrator.Core/            the graph engine: scheduling, retries, rollback,
-                                 approvals, guardrails, metrics, audit log
-  Orchestrator.Agents/          LLM-backed stage agents with offline fallback
-  Orchestrator.Cli/             scenario runner (greenfield/brownfield/ambiguous)
+                                 approvals, guardrails, metrics, audit log,
+                                 runtime graph expansion
+  Orchestrator.Agents/          LLM-backed stage agents with offline fallback,
+                                 the codebase scanner, the task-plan model
+  Orchestrator.Cli/             scenario runner (greenfield/brownfield/ambiguous/security)
 tests/
   UrlShortener.Tests/           unit + integration tests for the product
   Orchestrator.Tests/           unit tests for the engine (scheduling, retry,

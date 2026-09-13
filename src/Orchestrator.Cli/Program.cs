@@ -39,6 +39,28 @@ if (options.SimulateReplan)
     requirementAgent = new ChangingAgentDecorator(requirementAgent);
 }
 
+IStageAgent designAgent = new DesignAgent(llm);
+if (options.InjectPolicyViolation)
+{
+    designAgent = new PolicyViolatingAgentDecorator(designAgent);
+}
+
+// Each decomposed task becomes one of these: an implementation stage that depends on Design
+// plus whichever sibling tasks the decomposition said must come first. The approval gate sits
+// here, on the stages that actually generate code, rather than on the barrier that aggregates
+// work already done.
+StageDefinition BuildTaskStage(WorkTask task, IReadOnlyList<string> dependsOn) => new()
+{
+    Id = $"Implementation:{task.Id}",
+    DependsOn = dependsOn,
+    Agent = new TaskImplementationAgent(llm, artifactWriter, task),
+    MaxRetries = 2,
+    // Generating a code change is the high-impact action in this pipeline: it always takes a
+    // human checkpoint, and policy rules escalate further based on what the change touches.
+    HighImpact = true,
+    RequiresApproval = true
+};
+
 var stages = new List<StageDefinition>
 {
     new()
@@ -49,25 +71,60 @@ var stages = new List<StageDefinition>
     },
     new()
     {
-        Id = "Design",
+        Id = "CodebaseAnalysis",
         DependsOn = ["RequirementAnalysis"],
-        Agent = Wrap("Design", new DesignAgent(llm)),
-        MaxRetries = 2
+        Agent = Wrap("CodebaseAnalysis", new CodebaseAnalysisAgent(llm, artifactWriter, solutionRoot)),
+        MaxRetries = 2,
+        // Entry gate: only scan and reason about existing code when this change is landing in
+        // an existing system. A pure greenfield run records this as Skipped instead of
+        // pretending to have analyzed a codebase that isn't there.
+        EntryGate = c => !string.IsNullOrWhiteSpace(c.InitialInput.GetValueOrDefault("codebaseContext", "").ToString())
+    },
+    new()
+    {
+        Id = "TaskDecomposition",
+        DependsOn = ["RequirementAnalysis"], // runs concurrently with CodebaseAnalysis
+        Agent = Wrap("TaskDecomposition", new TaskDecompositionAgent(llm, artifactWriter, BuildTaskStage)),
+        MaxRetries = 2,
+        // Exit gate: a decomposition that produced no tasks is not a usable plan, whatever
+        // the agent reported, so treat it as a failure and let the retry policy handle it.
+        ExitGate = (_, result) => result.Success
+            && result.Outputs.TryGetValue("taskCount", out var count)
+            && int.TryParse(count.ToString(), out var parsed) && parsed > 0
+    },
+    new()
+    {
+        Id = "Design",
+        DependsOn = ["RequirementAnalysis", "CodebaseAnalysis", "TaskDecomposition"],
+        // AllSettled: design still proceeds when CodebaseAnalysis was gated out as
+        // inapplicable — a skipped optional input must not block the pipeline.
+        DependencyRule = DependencyRule.AllSettled,
+        Agent = Wrap("Design", designAgent),
+        MaxRetries = 2,
+        // A design is a decision about what will be built, so guardrails treat it as
+        // high-impact — for a security-sensitive change it needs sign-off before the
+        // implementation stages are even derived from it.
+        HighImpact = true
     },
     new()
     {
         Id = "Implementation",
-        DependsOn = ["Design"],
-        Agent = Wrap("Implementation", new ImplementationAgent(llm, artifactWriter)),
-        MaxRetries = 2,
-        RequiresApproval = true // high-impact action: generating a code change always needs a human checkpoint
+        DependsOn = ["Design"], // TaskDecomposition adds each derived task stage to this list
+        Agent = Wrap("Implementation", new ImplementationAggregatorAgent(artifactWriter)),
+        MaxRetries = 1
     },
     new()
     {
         Id = "Testing",
         DependsOn = ["Implementation"],
         Agent = Wrap("Testing", new TestingAgent(llm, artifactWriter, solutionRoot, runRealTests: !options.SkipRealTests)),
-        MaxRetries = 2
+        MaxRetries = 2,
+        // Exit gate: if this stage claims it ran the real suite, the suite must have passed.
+        // Guards against a stage reporting success while carrying a failing test result.
+        ExitGate = (_, result) => result.Success
+            && result.Outputs.ContainsKey("testPlanArtifact")
+            && (result.Outputs.GetValueOrDefault("realTestsRun", "false").ToString() != "true"
+                || result.Outputs.GetValueOrDefault("realTestsPassed", "false").ToString() == "true")
     },
     new()
     {
@@ -78,8 +135,19 @@ var stages = new List<StageDefinition>
     },
     new()
     {
+        Id = "SecurityReview",
+        DependsOn = ["Implementation"], // third parallel branch, but only when applicable
+        Agent = Wrap("SecurityReview", new SecurityReviewAgent(llm, artifactWriter)),
+        MaxRetries = 1,
+        EntryGate = SecurityReviewAgent.IsApplicable
+    },
+    new()
+    {
         Id = "ReleaseReadiness",
-        DependsOn = ["Testing", "Documentation"], // synchronization point for the two parallel branches
+        // Synchronization point for all three parallel branches. AllSettled so a security
+        // review that was correctly skipped as inapplicable doesn't block the release gate.
+        DependsOn = ["Testing", "Documentation", "SecurityReview"],
+        DependencyRule = DependencyRule.AllSettled,
         Agent = new ReleaseReadinessAgent(),
         MaxRetries = 0
     }
@@ -87,7 +155,12 @@ var stages = new List<StageDefinition>
 
 var graph = new WorkflowGraph(stages);
 IApprovalProvider approvals = options.AutoApprove ? new AutoApprovalProvider() : new ConsoleApprovalProvider();
-IReadOnlyList<IPolicyRule> policies = [new SecuritySensitiveChangeRule(), new DestructiveOperationRule()];
+IReadOnlyList<IPolicyRule> policies =
+[
+    new SecuritySensitiveChangeRule(),
+    new DestructiveOperationRule(),
+    new HardcodedCredentialRule()
+];
 
 Console.WriteLine($"=== Agentic SDLC Orchestrator — scenario '{options.Scenario}' (run {runId}) ===");
 Console.WriteLine($"Requirement: {requirement}");
@@ -168,4 +241,7 @@ static void PrintUsage()
     Console.WriteLine("  --simulate-replan           After a successful run, force RequirementAnalysis stale and");
     Console.WriteLine("                              re-run on the same context to demonstrate dynamic re-planning");
     Console.WriteLine("                              cascading through every downstream stage.");
+    Console.WriteLine("  --inject-policy-violation   Make the Design stage emit an embedded credential, so the");
+    Console.WriteLine("                              HardcodedCredential guardrail denies the next stage and trips");
+    Console.WriteLine("                              the engine's safe-stop.");
 }

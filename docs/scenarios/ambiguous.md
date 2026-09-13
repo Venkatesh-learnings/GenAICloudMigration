@@ -52,21 +52,35 @@ a production version would instead route unresolved ambiguities to a blocking hu
 checkpoint (the same `IApprovalProvider` mechanism already used for `Implementation`)
 before `Design` is allowed to proceed.
 
+## Decomposition under ambiguity
+
+`TaskDecomposition` still produces a validated task DAG here, but from a much thinner
+requirement — so it derives fewer tasks than the well-specified scenarios do. That
+difference is itself the signal: the decomposition can only be as specific as the
+requirement it was given, which is the practical cost of leaving the ambiguity
+unresolved.
+
+`CodebaseAnalysis` runs (this change targets the existing service), scanning the repo
+to ground any performance/reliability work in what's actually there — the fixed-window
+rate limiter and SQLite persistence it finds are the real constraints any "handle high
+traffic" design has to engage with.
+
 ## Orchestration trace (actual run, offline fallback mode)
 
 ```
--- Stage statuses --
-  RequirementAnalysis  Succeeded
-  Documentation        Succeeded
-  ReleaseReadiness     Succeeded
-  Testing              Succeeded
-  Implementation       Succeeded
-  Design               Succeeded
+Overall result: SUCCESS
 
--- Reliability metrics --
-  Success rate:     100 % (6/6 stages)
-  Total retries:    0
-  Total rollbacks:  0
+-- Stage statuses --
+  RequirementAnalysis  Succeeded    <- 2 ambiguities recorded
+  CodebaseAnalysis     Succeeded
+  TaskDecomposition    Succeeded
+  Design               Succeeded
+  Implementation:T*    Succeeded    (derived from the task plan)
+  Implementation       Succeeded
+  Testing              Succeeded
+  Documentation        Succeeded
+  SecurityReview       Skipped
+  ReleaseReadiness     Succeeded
 ```
 
 ## Validation

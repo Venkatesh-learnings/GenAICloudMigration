@@ -8,8 +8,9 @@ public class CliOptions
     public string? InjectFailureStage { get; set; }
     public int InjectFailureCount { get; set; } = 1;
     public bool SimulateReplan { get; set; }
+    public bool InjectPolicyViolation { get; set; }
 
-    public static readonly string[] KnownScenarios = ["greenfield", "brownfield", "ambiguous"];
+    public static readonly string[] KnownScenarios = ["greenfield", "brownfield", "ambiguous", "security"];
 
     public static CliOptions? Parse(string[] args)
     {
@@ -33,6 +34,10 @@ public class CliOptions
             else if (arg == "--simulate-replan")
             {
                 options.SimulateReplan = true;
+            }
+            else if (arg == "--inject-policy-violation")
+            {
+                options.InjectPolicyViolation = true;
             }
             else if (arg.StartsWith("--inject-failure="))
             {

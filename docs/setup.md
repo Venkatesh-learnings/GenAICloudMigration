@@ -43,8 +43,11 @@ curl http://localhost:5001/api/urls/abc1234/analytics
 dotnet run --project src/Orchestrator.Cli -- <scenario> [options]
 ```
 
-`<scenario>` is one of `greenfield`, `brownfield`, `ambiguous` (see
-[docs/scenarios/](.)). Options:
+`<scenario>` is one of `greenfield`, `brownfield`, `ambiguous` (the three the assignment
+asks for — see [docs/scenarios/](.)) plus `security`, a fourth scenario that exists to
+exercise the governance path: its requirement genuinely touches an auth surface, so the
+security guardrail escalates the high-impact stages to require approval and the
+conditional `SecurityReview` stage's entry gate opens. Options:
 
 | Flag | Effect |
 |---|---|
@@ -52,9 +55,11 @@ dotnet run --project src/Orchestrator.Cli -- <scenario> [options]
 | `--skip-real-tests` | Skip the real `dotnet test` run in the Testing stage (faster) |
 | `--inject-failure=Stage:N` | Fail `Stage` N times before letting it succeed — demonstrates bounded retry (small N) or rollback (N > the stage's MaxRetries) |
 | `--simulate-replan` | After a successful run, force `RequirementAnalysis` stale and re-run on the same context, cascading re-planning through every downstream stage |
+| `--inject-policy-violation` | Make the Design stage emit an embedded credential, so `HardcodedCredentialRule` denies the next stage and trips the engine's safe-stop |
 
-Without `--auto-approve`, the `Implementation` stage's approval checkpoint prompts on
-the console — you'll need to type `y` to let the run continue.
+Without `--auto-approve`, every high-impact stage (each derived `Implementation:T*` code-
+generating stage, and `Design` when the change is security-sensitive) prompts on the
+console — you'll need to type `y` to let the run continue.
 
 Examples:
 
@@ -73,7 +78,25 @@ dotnet run --project src/Orchestrator.Cli -- greenfield --auto-approve --skip-re
 # Demonstrate dynamic re-planning cascading through the whole downstream graph
 dotnet run --project src/Orchestrator.Cli -- greenfield --auto-approve --skip-real-tests \
   --simulate-replan
+
+# Demonstrate a guardrail DENYING a stage and halting the run via safe-stop
+dotnet run --project src/Orchestrator.Cli -- brownfield --auto-approve --skip-real-tests \
+  --inject-policy-violation
+
+# Demonstrate the conditional security review actually running, and the release gate
+# returning NO-GO because the review has not been signed off
+dotnet run --project src/Orchestrator.Cli -- security --auto-approve --skip-real-tests
 ```
+
+### What to look for in the output
+
+- `TaskDecomposition` reports how many tasks it derived and how many waves they sequence
+  into, and a `GraphExpanded` audit entry shows the implementation stages it added — the
+  count differs per scenario because it's derived from the requirement.
+- `CodebaseAnalysis` reports how many projects it scanned off disk and how many files
+  relate to the requirement (it is `Skipped` for greenfield).
+- `SecurityReview` shows as `Skipped` in the three main scenarios and `Succeeded` in
+  `security` — the entry gate deciding, not the agent.
 
 Every run writes `artifacts/runs/<runId>/report.json` (the full `RunReport`: stage
 statuses, decision lineage, audit log, metrics) plus each stage's generated artifacts

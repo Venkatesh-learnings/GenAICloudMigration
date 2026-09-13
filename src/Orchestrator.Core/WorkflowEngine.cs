@@ -54,11 +54,13 @@ public class WorkflowEngine
                 break;
             }
 
+            StageStatus StatusOf(string stageId) => statuses.GetOrAdd(stageId, StageStatus.Pending);
+
             var blockingChanged = PropagateBlocking(graph, statuses, ctx);
 
             var depsSatisfied = graph.Stages
-                .Where(s => statuses[s.Id] is StageStatus.Pending or StageStatus.Stale)
-                .Where(s => s.DependsOn.All(dep => statuses[dep] == StageStatus.Succeeded))
+                .Where(s => StatusOf(s.Id) is StageStatus.Pending or StageStatus.Stale)
+                .Where(s => s.DependenciesSatisfiedBy(StatusOf))
                 .ToList();
 
             var gatedOut = depsSatisfied.Where(s => !s.EntryGate(ctx)).ToList();
@@ -68,7 +70,7 @@ public class WorkflowEngine
                 ctx.Audit(stage.Id, AuditEventType.StageBlocked, "entry gate returned false; stage skipped");
             }
 
-            var ready = depsSatisfied.Where(s => statuses[s.Id] is StageStatus.Pending or StageStatus.Stale).ToList();
+            var ready = depsSatisfied.Where(s => StatusOf(s.Id) is StageStatus.Pending or StageStatus.Stale).ToList();
 
             if (ready.Count == 0)
             {
@@ -82,7 +84,7 @@ public class WorkflowEngine
                     continue;
                 }
 
-                var unresolved = graph.Stages.Where(s => statuses[s.Id] is StageStatus.Pending or StageStatus.Stale).ToList();
+                var unresolved = graph.Stages.Where(s => StatusOf(s.Id) is StageStatus.Pending or StageStatus.Stale).ToList();
                 if (unresolved.Count > 0)
                 {
                     stopReason = $"Deadlock: stage(s) {string.Join(", ", unresolved.Select(s => s.Id))} can never become ready.";
@@ -97,6 +99,8 @@ public class WorkflowEngine
 
             await Task.WhenAll(ready.Select(stage =>
                 ExecuteStageAsync(stage, ctx, statuses, guardrails, approvals, metrics, graph, ct)));
+
+            ApplyRequestedExpansions(graph, statuses, ctx);
         }
 
         var overallSuccess = stopReason is null &&
@@ -113,6 +117,41 @@ public class WorkflowEngine
             metrics.Snapshot());
     }
 
+    /// <summary>
+    /// Commits any stages that just-finished stages asked for, between scheduling ticks
+    /// so the graph is never mutated while stages run concurrently. A rejected expansion
+    /// (unknown dependency, cycle, or a barrier that already started) fails the run via
+    /// safe-stop rather than silently dropping the work the stage planned.
+    /// </summary>
+    private static void ApplyRequestedExpansions(
+        WorkflowGraph graph,
+        ConcurrentDictionary<string, StageStatus> statuses,
+        WorkflowContext ctx)
+    {
+        foreach (var expansion in ctx.DrainRequestedExpansions())
+        {
+            try
+            {
+                graph.AddStages(
+                    expansion.NewStages,
+                    expansion.AdditionalDependencies,
+                    stageId => statuses.GetValueOrDefault(stageId, StageStatus.Pending));
+
+                foreach (var stage in expansion.NewStages)
+                {
+                    statuses.TryAdd(stage.Id, StageStatus.Pending);
+                }
+
+                ctx.Audit("*", AuditEventType.GraphExpanded,
+                    $"graph expanded with {expansion.NewStages.Count} stage(s): {string.Join(", ", expansion.NewStages.Select(s => s.Id))}");
+            }
+            catch (InvalidOperationException ex)
+            {
+                ctx.RequestSafeStop($"Rejected graph expansion: {ex.Message}");
+            }
+        }
+    }
+
     /// <returns>true if any stage's status changed during this call.</returns>
     private static bool PropagateBlocking(WorkflowGraph graph, ConcurrentDictionary<string, StageStatus> statuses, WorkflowContext ctx)
     {
@@ -123,13 +162,15 @@ public class WorkflowEngine
             changed = false;
             foreach (var stage in graph.Stages)
             {
-                if (statuses[stage.Id] is not (StageStatus.Pending or StageStatus.Stale))
+                StageStatus StatusOf(string stageId) => statuses.GetOrAdd(stageId, StageStatus.Pending);
+
+                if (StatusOf(stage.Id) is not (StageStatus.Pending or StageStatus.Stale))
                 {
                     continue;
                 }
 
                 var blockedBy = stage.DependsOn.FirstOrDefault(dep =>
-                    statuses[dep] is StageStatus.Failed or StageStatus.Blocked or StageStatus.RolledBack);
+                    StatusOf(dep) is StageStatus.Failed or StageStatus.Blocked or StageStatus.RolledBack);
 
                 if (blockedBy is not null)
                 {
@@ -140,15 +181,18 @@ public class WorkflowEngine
                 }
 
                 // A dependency that was deliberately gated out (EntryGate false) can never
-                // produce the output this stage needs, so cascade the skip rather than
-                // leaving the stage stuck forever (readiness requires a Succeeded dependency,
-                // and Skipped is not something that would otherwise unblock it).
-                var skippedDep = stage.DependsOn.FirstOrDefault(dep => statuses[dep] == StageStatus.Skipped);
-                if (skippedDep is not null)
+                // produce the output this stage needed, so cascade the skip rather than leave
+                // the stage stuck forever. Stages declaring AllSettled opted out of that:
+                // they treat a skipped dependency as satisfied and still run.
+                if (stage.DependencyRule == DependencyRule.AllSucceeded)
                 {
-                    statuses[stage.Id] = StageStatus.Skipped;
-                    ctx.Audit(stage.Id, AuditEventType.StageBlocked, $"upstream dependency '{skippedDep}' was skipped; cascading skip");
-                    changed = true;
+                    var skippedDep = stage.DependsOn.FirstOrDefault(dep => StatusOf(dep) == StageStatus.Skipped);
+                    if (skippedDep is not null)
+                    {
+                        statuses[stage.Id] = StageStatus.Skipped;
+                        ctx.Audit(stage.Id, AuditEventType.StageBlocked, $"upstream dependency '{skippedDep}' was skipped; cascading skip");
+                        changed = true;
+                    }
                 }
             }
             everChanged |= changed;

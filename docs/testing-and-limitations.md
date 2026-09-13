@@ -12,8 +12,8 @@
   otherwise runs the exact `Program.cs` startup path, migrations included.
 - Domain-level tests on `ShortUrl.IsExpired`/`IsUsable` and the short-code alphabet.
 
-**`Orchestrator.Tests` (43 tests)** — the engine, entirely with scripted fakes, no LLM
-or network calls, no real `dotnet test` sub-processes, sub-200ms total runtime:
+**`Orchestrator.Tests`** — the engine, entirely with scripted fakes, no LLM or network
+calls, no real `dotnet test` sub-processes, sub-second total runtime:
 - Scheduling: diamond graphs proving genuine concurrency (not just declared
   parallelism), linear ordering, EntryGate → Skip, and skip-cascade to dependents.
 - Retry/rollback: bounded retry counts, `IRollbackable` invoked exactly once on
@@ -27,15 +27,31 @@ or network calls, no real `dotnet test` sub-processes, sub-200ms total runtime:
   not "rerun everything downstream unconditionally"); if the output genuinely changes,
   every transitive descendant is marked stale and re-executes, and `DecisionLineage`
   accumulates across both calls.
+- Dependency rules: an `AllSucceeded` dependent of a skipped stage cascades to skipped,
+  an `AllSettled` dependent still runs, and `AllSettled` still blocks on an actual
+  failure (it relaxes skips, not failures).
+- Runtime graph expansion: stages requested by a running stage are committed between
+  ticks and execute; a downstream barrier wired via `additionalDependencies` waits for
+  them; and an expansion that would introduce a cycle, an unknown dependency, a duplicate
+  id, or a dependency on an already-started stage is rejected atomically and trips
+  safe-stop rather than silently dropping planned work.
+- Guardrail scoping: the same sensitive requirement escalates a `HighImpact` stage to
+  approval and leaves a read-only stage alone; `HardcodedCredentialRule` denies and trips
+  safe-stop.
+- Task-plan validation (`WorkTaskPlan`): rejects empty plans, duplicate ids, unknown
+  dependencies and cycles; sequences a diamond into the expected concurrent waves.
+- `CodebaseScanner` against this repository: finds the real projects, the API's real
+  HTTP routes and the infrastructure project's real EF entity sets, and reports empty
+  for a nonexistent root.
 - `WorkflowGraph` validation (cycle detection, unknown-dependency detection) and
   `MetricsCollector` arithmetic (success rate, MTTR only appearing after an actual
   recovery) in isolation.
 
-**End-to-end / manual**: every scenario (greenfield/brownfield/ambiguous) was run via
-the CLI in both offline-fallback mode and against the real Anthropic API; retry and
-rollback were exercised via `--inject-failure`; re-planning was exercised via
-`--simulate-replan`; both Docker images were built and run, including a full
-create → redirect → analytics round trip against the containerized API.
+**End-to-end / manual**: every scenario (greenfield/brownfield/ambiguous/security) was
+run via the CLI in offline-fallback mode and against the real Anthropic API; retry and
+rollback via `--inject-failure`; re-planning via `--simulate-replan`; guardrail denial and
+safe-stop via `--inject-policy-violation`; both Docker images were built and run,
+including a full create → redirect → analytics round trip against the containerized API.
 
 ## Validation and risk control (Core Requirement #6)
 
@@ -44,7 +60,11 @@ create → redirect → analytics round trip against the containerized API.
 | LLM output isn't valid JSON / doesn't follow the schema | `AgentBase.TryParseLenientJson` extracts the outermost `{...}` span and parses defensively; a parse failure degrades to the offline template rather than throwing and failing the stage |
 | LLM is unreachable (no key, network failure, rate limit, bad model id) | Every call is wrapped in `LlmUnavailableException` handling with a deterministic offline fallback per agent — the run still completes and produces a real report |
 | An LLM "test plan" is trusted as if it were a real test result | `TestingAgent` actually shells out to `dotnet test`; the stage's `Success` is the real process exit code, not the model's opinion |
-| A stage that touches security/payment/auth surfaces gets shipped without a human looking at it | `SecuritySensitiveChangeRule` scans the requirement text and forces `RequireApproval` |
+| A stage that touches security/payment/auth surfaces gets shipped without a human looking at it | `SecuritySensitiveChangeRule` forces `RequireApproval` on high-impact stages, and the conditional `SecurityReview` stage's entry gate opens |
+| A credential ends up embedded in generated work | `HardcodedCredentialRule` **denies** (no approval offered) and trips safe-stop |
+| Approval fatigue — so many prompts that reviewers stop reading them | Policy escalation is scoped to `HighImpact` stages; read-only analysis stages never prompt |
+| A generated task plan with a cycle or a dangling dependency corrupts the workflow graph | `WorkTaskPlan.TryValidate` rejects it and the agent falls back to a deterministic decomposition; `WorkflowGraph.AddStages` independently re-validates and commits atomically |
+| A stage reports success while carrying a failing test result | `Testing`'s exit gate fails the stage unless a claimed real-suite run actually passed |
 | A destructive operation (schema drop, mass delete) slips through Design/Implementation | `DestructiveOperationRule` scans those stages' outputs for destructive keywords and forces `RequireApproval` |
 | A transient failure (flaky dependency, momentary LLM hiccup) fails a whole run | Bounded retry with exponential backoff before falling back to rollback |
 | An agent silently mutates the real product source tree with no review | `Implementation` writes to `artifacts/runs/<runId>/`, never to `src/`, forcing a human-reviewed apply step |
@@ -61,31 +81,45 @@ create → redirect → analytics round trip against the containerized API.
 2. **Ambiguity is surfaced, not blocked on.** The [ambiguous scenario](scenarios/ambiguous.md)
    flags unresolved ambiguity in the decision lineage but still lets `Design` proceed
    with a best-effort interpretation. A stricter version would route unresolved
-   ambiguity through the same `IApprovalProvider` checkpoint used for `Implementation`,
-   blocking `Design` until a human resolves it — deliberately left as a fallthrough here
-   to keep the three scenarios comparable (all six stages complete in all three).
+   ambiguity through the same `IApprovalProvider` checkpoint used for the code-generating
+   stages, blocking `Design` until a human resolves it — deliberately left as a
+   fallthrough here to keep the scenarios comparable.
 3. **The approval provider is process-local.** `ConsoleApprovalProvider` blocks on
    `Console.ReadLine()`; there's no persisted "pending approval" state that would let a
    real deployment pause a run, notify a human out-of-band (Slack, email), and resume it
    later. `IApprovalProvider` is the seam where that would plug in.
-4. **Policy rules are keyword-based, not semantic.** `SecuritySensitiveChangeRule` and
-   `DestructiveOperationRule` scan for literal substrings. This is transparent and fully
+4. **Policy rules are keyword-based, not semantic.** `SecuritySensitiveChangeRule`,
+   `DestructiveOperationRule` and `HardcodedCredentialRule` scan for literal substrings. This is transparent and fully
    auditable (a real advantage for a compliance-adjacent gate — you can point at exactly
    which string matched) but will both over- and under-trigger relative to a
    semantic understanding of the change. A production version would likely combine this
    deterministic layer with an LLM-based secondary check, keeping the deterministic
    rules as the non-bypassable floor.
-5. **Dynamic re-planning requires an explicit second `RunAsync` call.** The engine
+5. **The offline task decomposition is a clause-splitting heuristic.** With no LLM
+   available, `TaskDecompositionAgent` derives tasks by splitting the requirement on
+   clause boundaries, promoting anything that looks foundational, and fanning the rest
+   back into an integration task. It is genuinely input-derived (different requirements
+   give different task counts and shapes, and the plan is DAG-validated before it becomes
+   graph stages) but it is a text heuristic, not comprehension — task titles are clause
+   fragments rather than well-phrased work items. With a key set, the model does this
+   properly and the heuristic becomes the fallback it's meant to be.
+6. **The codebase scanner is regex-over-source, not a semantic model.** `CodebaseScanner`
+   reads real files and reports real projects, routes and entity sets, but it matches
+   patterns rather than parsing: unusual formatting can hide a route from it, and it
+   reasons about which files *mention* a requirement's terms rather than which ones the
+   change would truly touch. Roslyn would be the upgrade path if this were doing anything
+   load-bearing beyond informing the design stage.
+7. **Dynamic re-planning requires an explicit second `RunAsync` call.** The engine
    detects output drift and cascades staleness correctly (see `Orchestrator.Tests`), but
    nothing watches a live external system for upstream changes and triggers that second
    call automatically — `--simulate-replan` demonstrates the mechanism deliberately
    rather than it firing "for real" from an external event source, which is out of scope
    for a CLI prototype.
-6. **Single-process, in-memory run state.** `WorkflowContext`'s decision lineage and
+8. **Single-process, in-memory run state.** `WorkflowContext`'s decision lineage and
    audit log live in memory for the duration of one CLI invocation (persisted to
    `report.json` at the end); a long-running orchestrator service would need durable,
    crash-recoverable state instead of "the process is still alive."
-7. **No authentication on the URL shortener API.** Out of scope for the assignment's
+9. **No authentication on the URL shortener API.** Out of scope for the assignment's
    emphasis on orchestration, but a real deployment would need it before the create
    endpoint is exposed publicly.
 

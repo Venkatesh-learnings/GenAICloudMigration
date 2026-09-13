@@ -34,6 +34,20 @@ public static class ScenarioLibrary
             "on the create and redirect endpoints, and no caching layer."
         ),
 
+        // A fourth scenario beyond the three the assignment requires: it exists to exercise
+        // the governance path end to end. Its requirement genuinely touches an auth surface,
+        // so SecuritySensitiveChangeRule forces an approval and the conditional SecurityReview
+        // stage's entry gate opens (in the other scenarios that stage is correctly Skipped).
+        "security" =>
+        (
+            "Add API key authentication to the URL shortener's create endpoint: callers must present " +
+            "a token, tokens are issued per tenant and stored hashed, and an invalid or revoked token " +
+            "must be rejected without leaking whether the key ever existed.",
+            "Existing service: ASP.NET Core Web API with no authentication on any endpoint today. " +
+            "UrlsController exposes POST /api/urls anonymously, and UrlShortenerDbContext has no " +
+            "tenant or credential tables."
+        ),
+
         _ => throw new ArgumentOutOfRangeException(nameof(scenario), scenario, "Unknown scenario.")
     };
 }

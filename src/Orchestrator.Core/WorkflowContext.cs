@@ -26,8 +26,17 @@ public enum AuditEventType
     PolicyRequiredApproval,
     StageReplanned,
     SafeStopTriggered,
-    StageBlocked
+    StageBlocked,
+    GraphExpanded
 }
+
+/// <summary>
+/// New stages a running stage wants added to the graph, plus any existing stages that
+/// should now wait for them (typically a downstream barrier that fans the new work back in).
+/// </summary>
+public record StageExpansion(
+    IReadOnlyList<StageDefinition> NewStages,
+    IReadOnlyDictionary<string, IReadOnlyList<string>> AdditionalDependencies);
 
 public record AuditEntry(
     DateTimeOffset Timestamp,
@@ -51,6 +60,7 @@ public class WorkflowContext(string runId, string scenarioName, IReadOnlyDiction
     private readonly ConcurrentDictionary<string, string> _outputHashes = new();
     private readonly ConcurrentQueue<DecisionRecord> _decisionLineage = new();
     private readonly ConcurrentQueue<AuditEntry> _auditLog = new();
+    private readonly ConcurrentQueue<StageExpansion> _requestedExpansions = new();
 
     public volatile bool SafeStopRequested;
     public string? SafeStopReason;
@@ -59,6 +69,13 @@ public class WorkflowContext(string runId, string scenarioName, IReadOnlyDiction
     public IReadOnlyList<AuditEntry> AuditLog => [.. _auditLog];
 
     public StageResult? GetResult(string stageId) => _stageResults.GetValueOrDefault(stageId);
+
+    /// <summary>
+    /// Every stage result recorded so far. Policy rules scan this rather than naming
+    /// individual stages, so a guardrail still sees work produced by stages that only
+    /// came into existence at runtime (e.g. per-task implementation stages).
+    /// </summary>
+    public IReadOnlyDictionary<string, StageResult> AllResults => _stageResults.ToDictionary(kv => kv.Key, kv => kv.Value);
 
     public void SetResult(string stageId, StageResult result)
     {
@@ -77,6 +94,29 @@ public class WorkflowContext(string runId, string scenarioName, IReadOnlyDiction
         _decisionLineage.Enqueue(new DecisionRecord(stageId, DateTimeOffset.UtcNow, result.Summary, result.Rationale, hash));
 
         return previous is not null && previous != hash;
+    }
+
+    /// <summary>
+    /// Asks the engine to extend the graph with stages this stage just derived — e.g. one
+    /// implementation stage per decomposed task. The request is queued rather than applied
+    /// directly: the engine commits it between scheduling ticks, so the graph is never
+    /// mutated while stages are executing concurrently.
+    /// </summary>
+    public void RequestStages(
+        IReadOnlyList<StageDefinition> newStages,
+        IReadOnlyDictionary<string, IReadOnlyList<string>>? additionalDependencies = null) =>
+        _requestedExpansions.Enqueue(new StageExpansion(
+            newStages,
+            additionalDependencies ?? new Dictionary<string, IReadOnlyList<string>>()));
+
+    internal IReadOnlyList<StageExpansion> DrainRequestedExpansions()
+    {
+        var drained = new List<StageExpansion>();
+        while (_requestedExpansions.TryDequeue(out var expansion))
+        {
+            drained.Add(expansion);
+        }
+        return drained;
     }
 
     public void Audit(string stageId, AuditEventType eventType, string details) =>

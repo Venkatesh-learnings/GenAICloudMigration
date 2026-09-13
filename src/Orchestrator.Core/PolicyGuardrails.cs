@@ -63,6 +63,14 @@ public class SecuritySensitiveChangeRule : IPolicyRule
 
     public PolicyEvaluation Evaluate(WorkflowContext context, StageDefinition stage)
     {
+        // Only escalate stages that actually produce a change. Gating the read-only
+        // analysis stages too would demand a sign-off on every step of the run and train
+        // reviewers to click through approvals without reading them.
+        if (!stage.HighImpact)
+        {
+            return new PolicyEvaluation(PolicyDecision.Allow, "stage is not a high-impact action");
+        }
+
         var haystack = string.Join(" ", context.InitialInput.Values.Select(v => v?.ToString() ?? "")).ToLowerInvariant();
         var hit = SensitiveKeywords.FirstOrDefault(haystack.Contains);
 
@@ -81,17 +89,53 @@ public class DestructiveOperationRule : IPolicyRule
 
     public PolicyEvaluation Evaluate(WorkflowContext context, StageDefinition stage)
     {
-        var designResult = context.GetResult("Design");
-        var implResult = context.GetResult("Implementation");
-        var haystack = string.Join(" ", new[] { designResult, implResult }
-                .Where(r => r is not null)
-                .SelectMany(r => r!.Outputs.Values.Select(v => v?.ToString() ?? "")))
-            .ToLowerInvariant();
+        if (!stage.HighImpact)
+        {
+            return new PolicyEvaluation(PolicyDecision.Allow, "stage is not a high-impact action");
+        }
 
-        var hit = DestructiveKeywords.FirstOrDefault(haystack.Contains);
+        var hit = DestructiveKeywords.FirstOrDefault(PolicyScanning.ProducedWork(context).Contains);
 
         return hit is not null
             ? new PolicyEvaluation(PolicyDecision.RequireApproval, $"planned change contains destructive operation '{hit}'")
             : new PolicyEvaluation(PolicyDecision.Allow, "no destructive operations detected");
     }
+}
+
+/// <summary>
+/// The one rule that denies outright instead of asking a human. Shipping a credential in
+/// source is not a trade-off someone should be able to approve their way past in a hurry,
+/// so this trips the engine's safe-stop and halts the run for investigation.
+/// </summary>
+public class HardcodedCredentialRule : IPolicyRule
+{
+    private static readonly string[] CredentialPatterns =
+    [
+        "password = \"", "password=\"", "apikey = \"", "api_key = \"", "api key = \"",
+        "secret = \"", "connectionstring = \"user id", "aws_secret_access_key",
+        "begin rsa private key", "begin private key", "bearer sk-", "akia"
+    ];
+
+    public string Name => "HardcodedCredential";
+
+    public PolicyEvaluation Evaluate(WorkflowContext context, StageDefinition stage)
+    {
+        var hit = CredentialPatterns.FirstOrDefault(PolicyScanning.ProducedWork(context).Contains);
+
+        return hit is not null
+            ? new PolicyEvaluation(PolicyDecision.Deny, $"generated work appears to embed a credential (matched '{hit.Trim()}')")
+            : new PolicyEvaluation(PolicyDecision.Allow, "no embedded credentials detected");
+    }
+}
+
+internal static class PolicyScanning
+{
+    /// <summary>
+    /// Everything the run has produced so far, lowercased for matching. Scanning all
+    /// results rather than named stages means rules still cover stages created at runtime.
+    /// </summary>
+    public static string ProducedWork(WorkflowContext context) =>
+        string.Join(" ", context.AllResults.Values
+                .SelectMany(r => r.Outputs.Values.Select(v => v?.ToString() ?? "").Append(r.Summary)))
+            .ToLowerInvariant();
 }
