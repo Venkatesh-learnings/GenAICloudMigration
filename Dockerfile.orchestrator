@@ -1,0 +1,13 @@
+# The orchestrator CLI needs the .NET SDK (not just the runtime) because its
+# Testing stage shells out to `dotnet test` against the real solution as a
+# genuine validation signal, not a simulated one. This is a separate image
+# from the API's Dockerfile, which only needs the aspnet runtime.
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+WORKDIR /repo
+
+COPY . .
+RUN dotnet build GenAICloudMigration.sln -c Release
+
+ENTRYPOINT ["dotnet", "run", "--no-build", "-c", "Release", "--project", "src/Orchestrator.Cli", "--"]
+CMD ["greenfield", "--auto-approve", "--skip-real-tests"]
