@@ -1,0 +1,15 @@
+## .NET
+bin/
+obj/
+*.user
+
+## Runtime data
+*.db
+*.db-shm
+*.db-wal
+artifacts/runs/
+
+## Tooling
+.vs/
+.vscode/
+*.swp

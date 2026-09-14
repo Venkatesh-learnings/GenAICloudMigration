@@ -1,0 +1,31 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - urlshortener-data:/data
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+
+  # Runs one orchestrator scenario and exits. Not started by a plain
+  # `docker compose up` (it's in the "orchestrator" profile); invoke it
+  # explicitly, e.g.:
+  #   docker compose run --rm orchestrator brownfield --auto-approve
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    profiles: ["orchestrator"]
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
+    volumes:
+      - orchestrator-artifacts:/repo/artifacts
+    command: ["greenfield", "--auto-approve", "--skip-real-tests"]
+
+volumes:
+  urlshortener-data:
+  orchestrator-artifacts:
